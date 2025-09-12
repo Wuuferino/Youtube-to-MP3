@@ -1,0 +1,20 @@
+Build instructions (Windows)
+============================
+
+1. Ensure dependencies installed:
+   python -m pip install yt-dlp pyinstaller
+
+2. (Optional) Run GUI to test:
+   python gui_app.py
+
+3. Build single-folder executable:
+   pyinstaller --noconsole --name YouTubeMP3Gui gui_app.py
+
+   Result will be in .\dist\YouTubeMP3Gui\YouTubeMP3Gui.exe
+
+4. (Optional) Build single-file (slower startup):
+   pyinstaller --noconsole --onefile --name YouTubeMP3Gui gui_app.py
+
+5. Distribute the dist folder. First run may install yt-dlp if missing.
+
+Note: ffmpeg auto-download handled in downloader_core for CLI version; GUI requires ffmpeg in PATH or placed under .\ffmpeg\bin\ffmpeg.exe (auto download could be added similarly if needed).

@@ -1,0 +1,32 @@
+PyInstaller build instructions for GUI Pac-Man downloader (with custom Pac-Man icon)
+
+1. Install/upgrade build dependencies (run in PowerShell):
+   python -m pip install --upgrade pip
+   python -m pip install yt-dlp pyinstaller pillow
+
+2. (Optional first run) Launch the GUI once so auto ffmpeg fetch can populate .\ffmpeg\bin if you rely on auto-download.
+
+3. Generate pacman.ico (multi-size) using the helper script (provided as make_pacman_icon.py). Run:
+   python make_pacman_icon.py
+   This will create pacman.ico in the project root.
+
+4. Build single-file exe (no console) with icon:
+   pyinstaller --noconsole --onefile --icon pacman.ico --name YouTubeMP3PacMan gui_app.py
+
+5. (Optional) Bundle ffmpeg binaries so users always get MP3 conversion without separate download (requires ffmpeg/bin already present):
+   pyinstaller --noconsole --onefile --icon pacman.ico --name YouTubeMP3PacMan ^
+     --add-binary "ffmpeg/bin/ffmpeg.exe;ffmpeg/bin" ^
+     --add-binary "ffmpeg/bin/ffprobe.exe;ffmpeg/bin" gui_app.py
+   (Use ^ for line continuation in PowerShell, or put everything on one line.)
+
+6. Output exe appears at: dist/YouTubeMP3PacMan.exe
+
+7. (Optional smaller AV-trigger footprint) Use onedir instead of onefile:
+   pyinstaller --noconsole --onedir --icon pacman.ico --name YouTubeMP3PacMan gui_app.py
+
+8. Distribute: ship the exe (or folder) plus an example links.txt if desired.
+
+Troubleshooting:
+- WebM files still present: ensure ffmpeg was found (status bar says FFmpeg: Found) or bundle it (step 5).
+- Icon not showing: clear Windows Explorer icon cache or ensure you used --icon pacman.ico on the build that produced dist/.
+- If Python from Microsoft Store causes permission issues, try running PowerShell as Administrator or install Python from python.org.
