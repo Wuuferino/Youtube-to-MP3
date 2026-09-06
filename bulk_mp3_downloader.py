@@ -121,11 +121,11 @@ def read_links(path: str) -> list[str]:
 
 def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available: bool = True,
                    ffmpeg_path: str | None = None, sleep_min: float = None, sleep_max: float = None,
-                   skip_existing: bool = True):
+                   skip_existing: bool = True, workers: int | None = None):
     """Delegate to downloader_core so the CLI gets the same throttle handling,
     backoff and resume support as the GUI."""
     from downloader_core import (
-        download_urls, DownloadController, SLEEP_MIN, SLEEP_MAX,
+        download_urls, DownloadController, SLEEP_MIN, SLEEP_MAX, DEFAULT_WORKERS,
     )
 
     if not ffmpeg_available:
@@ -144,6 +144,7 @@ def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available
         sleep_min=SLEEP_MIN if sleep_min is None else sleep_min,
         sleep_max=SLEEP_MAX if sleep_max is None else sleep_max,
         skip_existing=skip_existing,
+        workers=DEFAULT_WORKERS if workers is None else workers,
     )
 
 
@@ -162,6 +163,8 @@ def main():
                         help='Minimum seconds to wait between videos (default 3)')
     parser.add_argument('--max-sleep', type=float, default=None,
                         help='Maximum seconds to wait between videos (default 8)')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Videos to download in parallel (default 4, max 8)')
     parser.add_argument('--ffmpeg', default=None, help='Explicit path to ffmpeg executable or its containing folder')
     parser.add_argument('--auto-ffmpeg', action='store_true', help='If ffmpeg missing, attempt to auto-download a Windows build locally')
     parser.add_argument('--require-mp3', action='store_true', help='Abort if mp3 conversion not possible (ffmpeg missing)')
@@ -189,7 +192,7 @@ def main():
 
     download_audio(urls, args.output, ffmpeg_available=has_ffmpeg, ffmpeg_path=ffmpeg_loc,
                    sleep_min=args.sleep, sleep_max=args.max_sleep,
-                   skip_existing=not args.redownload)
+                   skip_existing=not args.redownload, workers=args.workers)
 
 
 if __name__ == '__main__':

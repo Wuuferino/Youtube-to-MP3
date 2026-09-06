@@ -7,6 +7,8 @@ from tkinter import filedialog, messagebox
 from pathlib import Path
 import sys, os, socket
 from downloader_core import (
+    DEFAULT_WORKERS,
+    MAX_WORKERS,
     load_urls,
     download_urls,
     get_missing_urls,
@@ -67,6 +69,7 @@ class App:
         self.ffmpeg_status_var = tk.StringVar(value='FFmpeg: Checking...')
         self.allow_original_var = tk.BooleanVar(value=True)
         self.auto_ffmpeg_var = tk.BooleanVar(value=True)
+        self.workers_var = tk.IntVar(value=DEFAULT_WORKERS)
         self.controller = DownloadController()
         self.worker_thread: threading.Thread | None = None
         self.total_urls: list[str] = []
@@ -168,6 +171,9 @@ class App:
         opt_frame.grid(row=3, column=0, columnspan=3, sticky='we')
         tk.Checkbutton(opt_frame, text='Allow non-MP3 fallback', variable=self.allow_original_var, command=self._option_changed).pack(side='left')
         tk.Checkbutton(opt_frame, text='Auto-download ffmpeg', variable=self.auto_ffmpeg_var, command=self._option_changed).pack(side='left', padx=(12, 0))
+        tk.Label(opt_frame, text='Parallel:').pack(side='left', padx=(12, 2))
+        tk.Spinbox(opt_frame, from_=1, to=MAX_WORKERS, width=3,
+                   textvariable=self.workers_var).pack(side='left')
         tk.Label(opt_frame, textvariable=self.ffmpeg_status_var, fg='#555').pack(side='right')
 
         self.progress_canvas = tk.Canvas(frm, height=38, bg='#263238', highlightthickness=0)
@@ -330,6 +336,10 @@ class App:
     def _run_worker(self, urls: list[str]):
         out_dir = self.output_dir_var.get()
         require_mp3 = not self.allow_original_var.get()
+        try:
+            workers = max(1, min(int(self.workers_var.get()), MAX_WORKERS))
+        except Exception:
+            workers = DEFAULT_WORKERS
 
         def status_cb(msg):
             self._safe_after(0, lambda: self.status_var.set(msg))
@@ -348,6 +358,7 @@ class App:
             status_cb=status_cb,
             progress_cb=progress_cb,
             file_cb=file_cb,
+            workers=workers,
         )
 
         def finalize():
