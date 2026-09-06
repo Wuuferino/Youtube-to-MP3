@@ -17,6 +17,22 @@ OUTPUT_TEMPLATE = '%(title)s-%(id)s.%(ext)s'
 # every URL with 'Precondition check failed' / 'Please sign in'.
 MIN_YT_DLP = '2025.09.26'
 
+# YouTube rate-limits bursts per IP. Pausing between videos keeps you under the
+# limiter, which nets far more downloads per hour than hammering it and getting
+# throttled down to a trickle.
+SLEEP_MIN = 3
+SLEEP_MAX = 8
+SLEEP_REQUESTS = 1.0
+# How long to wait out a hard rate-limit before retrying the same URL.
+BACKOFF_START = 120
+BACKOFF_MAX = 900
+BACKOFF_RETRIES = 3
+
+_RATE_LIMIT_MARKERS = (
+    '429', 'too many requests', 'sign in to confirm', 'not a bot',
+    'rate limit', 'temporarily blocked', 'try again later',
+)
+
 class DownloadController:
     def __init__(self, ffmpeg_path: Optional[str] = None):
         self.stop_event = threading.Event()
@@ -201,6 +217,22 @@ def convert_leftovers(out_dir: str, ffmpeg_path: Optional[str] = None, status_cb
     return count
 
 
+def video_key(url: str) -> str:
+    """Identity for dedupe: youtu.be/X and watch?v=X are the same video.
+
+    Fetching both wastes a slot in YouTube's hourly budget and writes the same
+    file twice.
+    """
+    from urllib.parse import urlparse, parse_qs
+    try:
+        parsed = urlparse(url)
+        if 'youtu.be' in parsed.netloc:
+            return parsed.path.strip('/') or url
+        return parse_qs(parsed.query).get('v', [None])[0] or url
+    except Exception:
+        return url
+
+
 def load_urls(file_path: str) -> List[str]:
     urls: List[str] = []
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -214,8 +246,9 @@ def load_urls(file_path: str) -> List[str]:
     seen = set()
     unique = []
     for u in urls:
-        if u not in seen:
-            seen.add(u)
+        key = video_key(u)
+        if key not in seen:
+            seen.add(key)
             unique.append(u)
     return unique
 
@@ -254,6 +287,34 @@ def get_missing_urls(urls: List[str], out_dir: str) -> List[str]:
     return missing
 
 
+def detect_js_runtime() -> Optional[str]:
+    """Name of an available JS runtime for yt-dlp's signature challenges.
+
+    yt-dlp only enables deno by default, so node/bun must be opted into. We only
+    return names found on PATH, so yt-dlp can locate the binary itself.
+    """
+    for name in ('deno', 'node', 'bun'):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _is_rate_limited(text) -> bool:
+    low = str(text).lower()
+    return any(marker in low for marker in _RATE_LIMIT_MARKERS)
+
+
+def _interruptible_sleep(seconds: float, controller: 'DownloadController') -> bool:
+    """Sleep in slices so Stop stays responsive. False if stopped."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if controller.stop_event.is_set():
+            return False
+        controller.wait_if_paused()
+        time.sleep(min(0.5, max(0.0, deadline - time.time())))
+    return not controller.stop_event.is_set()
+
+
 class _YdlLogger:
     """Routes yt-dlp's own errors to the UI instead of letting them vanish."""
 
@@ -282,7 +343,9 @@ class _YdlLogger:
 
 
 def download_urls(urls: List[str], out_dir: str, controller: DownloadController, require_mp3: bool = True,
-                  status_cb=None, progress_cb=None, file_cb=None):
+                  status_cb=None, progress_cb=None, file_cb=None,
+                  sleep_min: float = SLEEP_MIN, sleep_max: float = SLEEP_MAX,
+                  skip_existing: bool = True):
     try:
         yt_dlp = ensure_yt_dlp(status_cb=status_cb)
     except RuntimeError as exc:
@@ -301,9 +364,18 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
             status_cb("ffmpeg not found; will save original audio format")
 
     logger = _YdlLogger(status_cb)
+    js_runtime = detect_js_runtime()
+    if status_cb and not js_runtime:
+        status_cb('No JS runtime (deno/node) found; some formats may be unavailable.')
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(Path(out_dir) / OUTPUT_TEMPLATE),
+        # Spread requests out so YouTube's per-IP limiter never trips.
+        'sleep_interval': sleep_min,
+        'max_sleep_interval': sleep_max,
+        'sleep_interval_requests': SLEEP_REQUESTS,
+        'retries': 10,
+        'extractor_retries': 5,
         # Errors must surface: silently returning None made every failure look like success.
         'ignoreerrors': False,
         # 'watch?v=X&list=Y' should yield one track, not the whole mix.
@@ -315,6 +387,10 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
             lambda d: _progress_hook(d, controller, status_cb, progress_cb)
         ],
     }
+    if js_runtime:
+        # API shape is {runtime: config}. The config must be a dict, not None:
+        # None passes validation but blows up downstream with AttributeError.
+        ydl_opts['js_runtimes'] = {js_runtime: {}}
     if ffmpeg:
         ydl_opts['ffmpeg_location'] = str(Path(ffmpeg).parent)
         ydl_opts['postprocessors'] = [
@@ -327,6 +403,8 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
     total = len(urls)
     failed: List[str] = []
     succeeded = 0
+    skipped = 0
+    done_log = load_log() if skip_existing else {}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         for idx, url in enumerate(urls, start=1):
             if controller.stop_event.is_set():
@@ -337,42 +415,72 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
             controller.wait_if_paused()
             if controller.stop_event.is_set():
                 break
+
+            # Resume support: a 400-track run will be interrupted, and
+            # re-downloading what is already on disk wastes the hourly budget.
+            entry_log = done_log.get(url)
+            if entry_log and Path(entry_log.get('file', '')).exists():
+                skipped += 1
+                if status_cb:
+                    status_cb(f"Skipping ({idx}/{total}), already have it: {url}")
+                continue
+
             if status_cb:
                 status_cb(f"Downloading ({idx}/{total}): {url}")
-            try:
-                res = ydl.extract_info(url, download=True)
-                if not res:
-                    failed.append(url)
-                    continue
-                is_playlist = res.get('_type') == 'playlist'
-                for entry in _iter_entries(res):
-                    path = _resolve_output_path(ydl, entry, out_dir, ffmpeg)
-                    # Log single videos under the URL the caller gave us, or
-                    # get_missing_urls can't find them (youtu.be/X vs watch?v=X).
-                    # Only playlist entries need their own key to avoid collisions.
-                    key = (entry.get('webpage_url') or url) if is_playlist else url
-                    mark_downloaded(key, path)
-                    succeeded += 1
-                    if file_cb:
-                        try:
-                            file_cb(idx, total, path, entry.get('title') or 'file',
-                                    Path(path).suffix.lstrip('.'))
-                        except Exception:
-                            pass
-            except Exception as e:
-                if controller.stop_event.is_set():
+
+            backoff = BACKOFF_START
+            for attempt in range(BACKOFF_RETRIES + 1):
+                try:
+                    res = ydl.extract_info(url, download=True)
+                    if not res:
+                        failed.append(url)
+                        break
+                    is_playlist = res.get('_type') == 'playlist'
+                    for entry in _iter_entries(res):
+                        path = _resolve_output_path(ydl, entry, out_dir, ffmpeg)
+                        # Log single videos under the URL the caller gave us, or
+                        # get_missing_urls can't find them (youtu.be/X vs watch?v=X).
+                        # Only playlist entries need their own key to avoid collisions.
+                        key = (entry.get('webpage_url') or url) if is_playlist else url
+                        mark_downloaded(key, path)
+                        succeeded += 1
+                        if file_cb:
+                            try:
+                                file_cb(idx, total, path, entry.get('title') or 'file',
+                                        Path(path).suffix.lstrip('.'))
+                            except Exception:
+                                pass
                     break
-                failed.append(url)
-                if status_cb:
-                    status_cb(f"Failed: {url} -- {e}")
+                except Exception as e:
+                    if controller.stop_event.is_set():
+                        break
+                    # A hard rate-limit is worth waiting out; anything else is
+                    # a per-video problem and retrying it just burns quota.
+                    if _is_rate_limited(e) and attempt < BACKOFF_RETRIES:
+                        if status_cb:
+                            status_cb(f"Rate limited by YouTube. Waiting {backoff}s "
+                                      f"before retry {attempt + 1}/{BACKOFF_RETRIES}...")
+                        if not _interruptible_sleep(backoff, controller):
+                            break
+                        backoff = min(backoff * 2, BACKOFF_MAX)
+                        continue
+                    failed.append(url)
+                    if status_cb:
+                        status_cb(f"Failed: {url} -- {e}")
+                    break
+            if controller.stop_event.is_set():
+                break
 
     controller.current_url = None
     if status_cb and not controller.stop_event.is_set():
+        summary = f"{succeeded} downloaded"
+        if skipped:
+            summary += f", {skipped} already had"
         if failed:
-            status_cb(f"Done with errors: {succeeded} downloaded, {len(failed)} failed. "
+            status_cb(f"Done with errors: {summary}, {len(failed)} failed. "
                       f"First failure: {failed[0]}")
         else:
-            status_cb(f"Done. {succeeded} downloaded.")
+            status_cb(f"Done. {summary}.")
 
 
 def _iter_entries(res: Dict[str, Any]):

@@ -1,4 +1,3 @@
-import subprocess
 import sys
 import os
 import shutil
@@ -101,20 +100,8 @@ def debug_environment():
         print("yt_dlp import failed:", e)
 
 
-def _video_key(url: str) -> str:
-    """Identity for dedupe: youtu.be/X and watch?v=X are the same video."""
-    from urllib.parse import urlparse, parse_qs
-    try:
-        u = urlparse(url)
-        if 'youtu.be' in u.netloc:
-            return u.path.strip('/') or url
-        vid = parse_qs(u.query).get('v', [None])[0]
-        return vid or url
-    except Exception:
-        return url
-
-
 def read_links(path: str) -> list[str]:
+    from downloader_core import video_key
     with open(path, 'r', encoding='utf-8') as f:
         lines = [ln.strip() for ln in f.readlines()]
     urls = []
@@ -124,7 +111,7 @@ def read_links(path: str) -> list[str]:
             continue
         for part in ln.split():
             if part.startswith('http://') or part.startswith('https://'):
-                key = _video_key(part)
+                key = video_key(part)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -132,68 +119,32 @@ def read_links(path: str) -> list[str]:
     return urls
 
 
-def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available: bool = True, ffmpeg_path: str | None = None):
-    from yt_dlp import YoutubeDL
-
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-    postprocessors = []
-    if ffmpeg_available:
-        postprocessors = [
-            {
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            },
-            {'key': 'FFmpegMetadata'}
-        ]
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': os.path.join(out_dir, '%(title)s.%(ext)s' if not ffmpeg_available else '%(title)s.%(ext)s'),
-        'postprocessors': postprocessors,
-        'ignoreerrors': False,
-        'noplaylist': True,
-        'quiet': False,
-        'progress_hooks': [progress_hook]
-    }
-
-    if ffmpeg_available and ffmpeg_path:
-        ffdir = ffmpeg_path
-        if ffdir.lower().endswith('ffmpeg.exe'):
-            ffdir = str(Path(ffmpeg_path).parent)
-        ydl_opts['ffmpeg_location'] = ffdir
+def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available: bool = True,
+                   ffmpeg_path: str | None = None, sleep_min: float = None, sleep_max: float = None,
+                   skip_existing: bool = True):
+    """Delegate to downloader_core so the CLI gets the same throttle handling,
+    backoff and resume support as the GUI."""
+    from downloader_core import (
+        download_urls, DownloadController, SLEEP_MIN, SLEEP_MAX,
+    )
 
     if not ffmpeg_available:
-        print("NOTE: ffmpeg not detected. Original audio container (webm/m4a) will be saved instead of MP3. Install ffmpeg and re-run to convert.")
+        print("NOTE: ffmpeg not detected. Original audio container (webm/m4a) will be "
+              "saved instead of MP3. Install ffmpeg and re-run to convert.")
 
-    failures = []
-    with YoutubeDL(ydl_opts) as ydl:
-        for url in urls:
-            print(f"\n=== Downloading: {url} ===")
-            try:
-                ydl.download([url])
-            except Exception as e: 
-                print(f"Error downloading {url}: {e}")
-                failures.append(url)
-    if failures:
-        print("\nThe following URLs failed:")
-        for f in failures:
-            print(f"  {f}")
-    else:
-        print("\nAll downloads completed.")
-
-
-def progress_hook(d):
-    if d.get('status') == 'downloading':
-        total = d.get('total_bytes') or d.get('total_bytes_estimate')
-        downloaded = d.get('downloaded_bytes')
-        if total and downloaded:
-            pct = downloaded / total * 100
-            sys.stdout.write(f"\r  Downloading: {pct:5.1f}%")
-            sys.stdout.flush()
-    elif d.get('status') == 'finished':
-        print("\n  Converting to mp3...")
+    controller = DownloadController(ffmpeg_path=ffmpeg_path)
+    download_urls(
+        urls,
+        out_dir,
+        controller,
+        require_mp3=ffmpeg_available,
+        status_cb=print,
+        progress_cb=None,
+        file_cb=None,
+        sleep_min=SLEEP_MIN if sleep_min is None else sleep_min,
+        sleep_max=SLEEP_MAX if sleep_max is None else sleep_max,
+        skip_existing=skip_existing,
+    )
 
 
 def main():
@@ -203,7 +154,14 @@ def main():
     parser.add_argument('-o', '--output', default=str(Path.home() / 'Music' / 'YouTube MP3'),
                         help='Output directory for MP3 files')
     parser.add_argument('--max', type=int, default=None, help='Maximum number of links to process')
-    parser.add_argument('--skip-existing', action='store_true', help='Skip if MP3 with same title already exists')
+    parser.add_argument('--skip-existing', action='store_true',
+                        help='(default) Skip links already downloaded and still on disk')
+    parser.add_argument('--redownload', action='store_true',
+                        help='Ignore the download log and fetch everything again')
+    parser.add_argument('--sleep', type=float, default=None,
+                        help='Minimum seconds to wait between videos (default 3)')
+    parser.add_argument('--max-sleep', type=float, default=None,
+                        help='Maximum seconds to wait between videos (default 8)')
     parser.add_argument('--ffmpeg', default=None, help='Explicit path to ffmpeg executable or its containing folder')
     parser.add_argument('--auto-ffmpeg', action='store_true', help='If ffmpeg missing, attempt to auto-download a Windows build locally')
     parser.add_argument('--require-mp3', action='store_true', help='Abort if mp3 conversion not possible (ffmpeg missing)')
@@ -229,10 +187,9 @@ def main():
         print('No URLs found in input file.')
         return
 
-    if args.skip_existing:
-        pass
-
-    download_audio(urls, args.output, ffmpeg_available=has_ffmpeg, ffmpeg_path=ffmpeg_loc)
+    download_audio(urls, args.output, ffmpeg_available=has_ffmpeg, ffmpeg_path=ffmpeg_loc,
+                   sleep_min=args.sleep, sleep_max=args.max_sleep,
+                   skip_existing=not args.redownload)
 
 
 if __name__ == '__main__':
