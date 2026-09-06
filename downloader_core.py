@@ -13,6 +13,10 @@ import sys
 LOG_FILE = 'download_log.json'
 OUTPUT_TEMPLATE = '%(title)s-%(id)s.%(ext)s'
 
+# YouTube retires old player-API paths regularly. Builds older than this fail
+# every URL with 'Precondition check failed' / 'Please sign in'.
+MIN_YT_DLP = '2025.09.26'
+
 class DownloadController:
     def __init__(self, ffmpeg_path: Optional[str] = None):
         self.stop_event = threading.Event()
@@ -38,12 +42,72 @@ class DownloadController:
             time.sleep(0.3)
 
 
-def ensure_yt_dlp():
+def _version_tuple(value: str):
+    parts = []
+    for chunk in str(value).split('.'):
+        digits = ''.join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def ensure_yt_dlp(status_cb=None, min_version: str = MIN_YT_DLP):
+    """Import yt-dlp, installing or upgrading it when missing or too old.
+
+    Returns the imported module. Raises RuntimeError if it cannot be made usable.
+    """
+    import subprocess
+    import importlib
+
+    def report(msg):
+        if status_cb:
+            status_cb(msg)
+
     try:
-        import yt_dlp 
+        import yt_dlp
+        current = yt_dlp_version(yt_dlp)
+        if _version_tuple(current) >= _version_tuple(min_version):
+            return yt_dlp
+        report(f'yt-dlp {current} is too old (need {min_version}+); upgrading...')
     except ImportError:
-        import subprocess, sys
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'yt-dlp'])
+        report('yt-dlp not installed; installing...')
+
+    if getattr(sys, 'frozen', False):
+        # A PyInstaller build freezes yt-dlp at build time and cannot self-update.
+        raise RuntimeError(
+            'yt-dlp bundled in this build is outdated and cannot update itself. '
+            'Rebuild the exe after running: python -m pip install --upgrade yt-dlp'
+        )
+
+    installed = False
+    for cmd in ([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'],
+                ['py', '-m', 'pip', 'install', '--upgrade', 'yt-dlp']):
+        try:
+            subprocess.check_call(cmd)
+            installed = True
+            break
+        except Exception:
+            continue
+    if not installed:
+        raise RuntimeError(
+            'Could not install yt-dlp. Run manually: python -m pip install --upgrade yt-dlp'
+        )
+
+    # Drop cached submodules so the freshly installed version is the one imported.
+    importlib.invalidate_caches()
+    for name in [n for n in list(sys.modules) if n == 'yt_dlp' or n.startswith('yt_dlp.')]:
+        del sys.modules[name]
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise RuntimeError(
+            'yt-dlp still unavailable after install. Run: python -m pip install --upgrade yt-dlp'
+        ) from exc
+    report(f'yt-dlp ready ({yt_dlp_version(yt_dlp)})')
+    return yt_dlp
+
+
+def yt_dlp_version(module) -> str:
+    return getattr(getattr(module, 'version', None), '__version__', '0')
 
 
 def auto_download_ffmpeg(target_root: Path) -> Optional[str]:
@@ -70,13 +134,14 @@ def auto_download_ffmpeg(target_root: Path) -> Optional[str]:
 
 
 def detect_ffmpeg(explicit: Optional[str] = None) -> Optional[str]:
-    # ...existing code...
+    # Search order: explicit path, PyInstaller bundle, local ./ffmpeg/bin, exe dir, PATH.
+    exe_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
     if explicit:
         p = Path(explicit)
         if p.is_file():
             return str(p)
         if p.is_dir():
-            exe = p / 'ffmpeg.exe'
+            exe = p / exe_name
             if exe.exists():
                 return str(exe)
 
@@ -89,13 +154,13 @@ def detect_ffmpeg(explicit: Optional[str] = None) -> Optional[str]:
         if pyi_root_ff.exists():
             return str(pyi_root_ff)
 
-    local = Path('ffmpeg') / 'bin' / 'ffmpeg.exe'
+    local = Path('ffmpeg') / 'bin' / exe_name
     if local.exists():
         return str(local)
 
     try:
         exe_dir = Path(getattr(sys, 'frozen', False) and sys.executable or __file__).resolve().parent
-        direct = exe_dir / 'ffmpeg.exe'
+        direct = exe_dir / exe_name
         if direct.exists():
             return str(direct)
     except Exception: 
@@ -189,10 +254,41 @@ def get_missing_urls(urls: List[str], out_dir: str) -> List[str]:
     return missing
 
 
+class _YdlLogger:
+    """Routes yt-dlp's own errors to the UI instead of letting them vanish."""
+
+    def __init__(self, status_cb=None):
+        self.status_cb = status_cb
+        self.errors: List[str] = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        text = str(msg)
+        if 'Please sign in' in text or 'Precondition' in text or 'not a bot' in text:
+            self.errors.append(text)
+            if self.status_cb:
+                self.status_cb(text)
+
+    def error(self, msg):
+        text = str(msg)
+        self.errors.append(text)
+        if self.status_cb:
+            self.status_cb(text)
+
+
 def download_urls(urls: List[str], out_dir: str, controller: DownloadController, require_mp3: bool = True,
                   status_cb=None, progress_cb=None, file_cb=None):
-    ensure_yt_dlp()
-    import yt_dlp
+    try:
+        yt_dlp = ensure_yt_dlp(status_cb=status_cb)
+    except RuntimeError as exc:
+        if status_cb:
+            status_cb(str(exc))
+        return
 
     ffmpeg = detect_ffmpeg(controller.ffmpeg_path)
     if not ffmpeg and require_mp3:
@@ -204,12 +300,17 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
         if status_cb:
             status_cb("ffmpeg not found; will save original audio format")
 
+    logger = _YdlLogger(status_cb)
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': str(Path(out_dir) / OUTPUT_TEMPLATE),
-        'ignoreerrors': True,
-        'noplaylist': False,
+        # Errors must surface: silently returning None made every failure look like success.
+        'ignoreerrors': False,
+        # 'watch?v=X&list=Y' should yield one track, not the whole mix.
+        'noplaylist': True,
         'quiet': True,
+        'no_warnings': False,
+        'logger': logger,
         'progress_hooks': [
             lambda d: _progress_hook(d, controller, status_cb, progress_cb)
         ],
@@ -224,6 +325,8 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     total = len(urls)
+    failed: List[str] = []
+    succeeded = 0
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         for idx, url in enumerate(urls, start=1):
             if controller.stop_event.is_set():
@@ -235,30 +338,71 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
             if controller.stop_event.is_set():
                 break
             if status_cb:
-                status_cb(f"Downloading ({idx}/{len(urls)}): {url}")
+                status_cb(f"Downloading ({idx}/{total}): {url}")
             try:
                 res = ydl.extract_info(url, download=True)
-                if res:
-                    ext = 'mp3' if ffmpeg else res.get('ext', 'm4a')
-                    title = res.get('title') or 'file'
-                    video_id = res.get('id') or ''
-                    filename = f"{title}-{video_id}.{ext}" if video_id else f"{title}.{ext}"
-                    full_path = str(Path(out_dir) / filename)
-                    mark_downloaded(url, full_path)
+                if not res:
+                    failed.append(url)
+                    continue
+                is_playlist = res.get('_type') == 'playlist'
+                for entry in _iter_entries(res):
+                    path = _resolve_output_path(ydl, entry, out_dir, ffmpeg)
+                    # Log single videos under the URL the caller gave us, or
+                    # get_missing_urls can't find them (youtu.be/X vs watch?v=X).
+                    # Only playlist entries need their own key to avoid collisions.
+                    key = (entry.get('webpage_url') or url) if is_playlist else url
+                    mark_downloaded(key, path)
+                    succeeded += 1
                     if file_cb:
                         try:
-                            file_cb(idx, total, full_path, title, ext)
+                            file_cb(idx, total, path, entry.get('title') or 'file',
+                                    Path(path).suffix.lstrip('.'))
                         except Exception:
                             pass
             except Exception as e:
-                if status_cb:
-                    status_cb(f"Error: {e}")
                 if controller.stop_event.is_set():
                     break
+                failed.append(url)
+                if status_cb:
+                    status_cb(f"Failed: {url} -- {e}")
 
     controller.current_url = None
     if status_cb and not controller.stop_event.is_set():
-        status_cb("Done.")
+        if failed:
+            status_cb(f"Done with errors: {succeeded} downloaded, {len(failed)} failed. "
+                      f"First failure: {failed[0]}")
+        else:
+            status_cb(f"Done. {succeeded} downloaded.")
+
+
+def _iter_entries(res: Dict[str, Any]):
+    """Yield the individual video dicts from a single-video or playlist result."""
+    if res.get('_type') == 'playlist':
+        for entry in (res.get('entries') or []):
+            if entry:
+                yield entry
+    else:
+        yield res
+
+
+def _resolve_output_path(ydl, entry: Dict[str, Any], out_dir: str, ffmpeg: Optional[str]) -> str:
+    """Real on-disk path for an entry.
+
+    yt-dlp sanitizes titles ('AC/DC' -> 'AC\u29f8DC'), so rebuilding the name from the
+    raw title produced log paths that never matched the file that was written.
+    """
+    try:
+        name = ydl.prepare_filename(entry)
+    except Exception:
+        title = entry.get('title') or 'file'
+        video_id = entry.get('id') or ''
+        name = str(Path(out_dir) / (f"{title}-{video_id}" if video_id else title))
+    path = Path(name)
+    if ffmpeg:
+        path = path.with_suffix('.mp3')
+    if not path.is_absolute() and path.parent == Path('.'):
+        path = Path(out_dir) / path.name
+    return str(path)
 
 
 def _progress_hook(d, controller: DownloadController, status_cb, progress_cb):

@@ -1,2 +1,3 @@
-yt-dlp>=2024.7.1
+# YouTube retires old player-API paths; older builds fail with "Please sign in".
+yt-dlp>=2025.09.26
 Pillow>=10.0.0

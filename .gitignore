@@ -3,3 +3,6 @@
 /ffmpeg/
 *.exe
 *.pkg
+__pycache__/
+*.pyc
+download_log.json

@@ -8,27 +8,13 @@ import urllib.request
 from pathlib import Path
 
 def ensure_dependencies():
-    """Ensure yt-dlp is installed. Falls back to invoking via 'py' launcher if needed."""
+    """Ensure yt-dlp is present AND recent enough for current YouTube."""
+    from downloader_core import ensure_yt_dlp
     try:
-        import yt_dlp 
-        return
-    except ImportError:
-        print("yt-dlp not installed – attempting installation...")
-
-    cmd_base = [sys.executable, '-m', 'pip']
-    try:
-        subprocess.check_call(cmd_base + ['install', '--upgrade', 'pip'])
-    except Exception:
-        pass
-    try:
-        subprocess.check_call(cmd_base + ['install', 'yt-dlp'])
-    except Exception as e:
-        print(f"Primary install attempt failed: {e}\nTrying with 'py' launcher...")
-        try:
-            subprocess.check_call(['py', '-m', 'pip', 'install', 'yt-dlp'])
-        except Exception as e2:
-            print("Failed to install yt-dlp. Please install manually: py -m pip install yt-dlp")
-            print(f"Error details: {e2}")
+        ensure_yt_dlp(status_cb=print)
+    except RuntimeError as e:
+        print(e)
+        sys.exit(1)
 
 
 def check_ffmpeg(explicit_path: str | None = None):
@@ -36,7 +22,8 @@ def check_ffmpeg(explicit_path: str | None = None):
     candidates = []
     if explicit_path:
         candidates.append(explicit_path)
-    local_ffmpeg = Path('ffmpeg') / 'bin' / 'ffmpeg.exe'
+    exe_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+    local_ffmpeg = Path('ffmpeg') / 'bin' / exe_name
     if local_ffmpeg.exists():
         candidates.append(str(local_ffmpeg))
     found_in_path = shutil.which('ffmpeg')
@@ -48,7 +35,7 @@ def check_ffmpeg(explicit_path: str | None = None):
         if p.is_file():
             return True, str(p)
         if p.is_dir():
-            exe = p / 'ffmpeg.exe'
+            exe = p / exe_name
             if exe.exists():
                 return True, str(exe)
     print("WARNING: 'ffmpeg' not found – MP3 conversion will be skipped.\n"
@@ -114,15 +101,33 @@ def debug_environment():
         print("yt_dlp import failed:", e)
 
 
+def _video_key(url: str) -> str:
+    """Identity for dedupe: youtu.be/X and watch?v=X are the same video."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        u = urlparse(url)
+        if 'youtu.be' in u.netloc:
+            return u.path.strip('/') or url
+        vid = parse_qs(u.query).get('v', [None])[0]
+        return vid or url
+    except Exception:
+        return url
+
+
 def read_links(path: str) -> list[str]:
     with open(path, 'r', encoding='utf-8') as f:
         lines = [ln.strip() for ln in f.readlines()]
     urls = []
+    seen = set()
     for ln in lines:
         if not ln or ln.startswith('#'):
             continue
         for part in ln.split():
             if part.startswith('http://') or part.startswith('https://'):
+                key = _video_key(part)
+                if key in seen:
+                    continue
+                seen.add(key)
                 urls.append(part)
     return urls
 
@@ -147,8 +152,8 @@ def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(out_dir, '%(title)s.%(ext)s' if not ffmpeg_available else '%(title)s.%(ext)s'),
         'postprocessors': postprocessors,
-        'ignoreerrors': True,
-        'noplaylist': False,
+        'ignoreerrors': False,
+        'noplaylist': True,
         'quiet': False,
         'progress_hooks': [progress_hook]
     }
@@ -195,7 +200,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Bulk YouTube -> MP3 downloader')
     parser.add_argument('-i', '--input', default='links.txt', help='Path to text file with YouTube links')
-    parser.add_argument('-o', '--output', default=r'C:\\Users\\rasmu\\Music\\Isto Laulud', help='Output directory for MP3 files')
+    parser.add_argument('-o', '--output', default=str(Path.home() / 'Music' / 'YouTube MP3'),
+                        help='Output directory for MP3 files')
     parser.add_argument('--max', type=int, default=None, help='Maximum number of links to process')
     parser.add_argument('--skip-existing', action='store_true', help='Skip if MP3 with same title already exists')
     parser.add_argument('--ffmpeg', default=None, help='Explicit path to ffmpeg executable or its containing folder')
