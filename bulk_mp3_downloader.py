@@ -1,10 +1,13 @@
-import sys
+from __future__ import annotations
+
+import io
 import os
 import shutil
-import zipfile
-import io
+import sys
 import urllib.request
+import zipfile
 from pathlib import Path
+
 
 def ensure_dependencies():
     """Ensure yt-dlp is present AND recent enough for current YouTube."""
@@ -87,15 +90,16 @@ def debug_environment():
     print("Python:", _sys.version)
     print("Executable:", _sys.executable)
     try:
-        import yt_dlp as _y
         import importlib.metadata as _im
+
+        import yt_dlp as _y
         print("yt_dlp module file:", getattr(_y, '__file__', 'UNKNOWN'))
         try:
             print("yt_dlp package version:", _im.version('yt-dlp'))
         except Exception: 
             print("Could not retrieve yt-dlp version via importlib.metadata")
         if hasattr(_y, '__version__'):
-            print("yt_dlp.__version__:", getattr(_y, '__version__'))
+            print("yt_dlp.__version__:", _y.__version__)
     except Exception as e: 
         print("yt_dlp import failed:", e)
 
@@ -103,14 +107,14 @@ def debug_environment():
 def read_links(path: str) -> list[str]:
     from downloader_core import video_key
     with open(path, 'r', encoding='utf-8') as f:
-        lines = [ln.strip() for ln in f.readlines()]
+        lines = [ln.strip() for ln in f]
     urls = []
     seen = set()
     for ln in lines:
         if not ln or ln.startswith('#'):
             continue
         for part in ln.split():
-            if part.startswith('http://') or part.startswith('https://'):
+            if part.startswith(('http://', 'https://')):
                 key = video_key(part)
                 if key in seen:
                     continue
@@ -120,12 +124,16 @@ def read_links(path: str) -> list[str]:
 
 
 def download_audio(urls: list[str], out_dir: str = 'downloads', ffmpeg_available: bool = True,
-                   ffmpeg_path: str | None = None, sleep_min: float = None, sleep_max: float = None,
+                   ffmpeg_path: str | None = None, sleep_min: float | None = None, sleep_max: float | None = None,
                    skip_existing: bool = True, workers: int | None = None):
     """Delegate to downloader_core so the CLI gets the same throttle handling,
     backoff and resume support as the GUI."""
     from downloader_core import (
-        download_urls, DownloadController, SLEEP_MIN, SLEEP_MAX, DEFAULT_WORKERS,
+        DEFAULT_WORKERS,
+        SLEEP_MAX,
+        SLEEP_MIN,
+        DownloadController,
+        download_urls,
     )
 
     if not ffmpeg_available:
