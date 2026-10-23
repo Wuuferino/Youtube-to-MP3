@@ -1,21 +1,24 @@
 
 from __future__ import annotations
 
+import os
+import socket
+import sys
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
 from pathlib import Path
-import sys, os, socket
+from tkinter import filedialog, messagebox
+
 from downloader_core import (
     DEFAULT_WORKERS,
     MAX_WORKERS,
-    load_urls,
-    download_urls,
-    get_missing_urls,
     DownloadController,
+    auto_download_ffmpeg,
     convert_leftovers,
     detect_ffmpeg,
-    auto_download_ffmpeg,
+    download_urls,
+    get_missing_urls,
+    load_urls,
 )
 
 
@@ -344,10 +347,10 @@ class App:
         def status_cb(msg):
             self._safe_after(0, lambda: self.status_var.set(msg))
 
-        def progress_cb(pct, downloaded, total, speed):  # noqa: D401
+        def progress_cb(pct, downloaded, total, speed):
             self._safe_after(0, lambda: self._update_progress_bar(pct))
 
-        def file_cb(idx, total, path, title, ext):  # noqa: D401
+        def file_cb(idx, total, path, title, ext):
             self._safe_after(0, lambda: self._file_done(path, total))
 
         download_urls(

@@ -1,5 +1,6 @@
 from PIL import Image, ImageDraw
 
+
 def make_icon():
     sizes = [16, 24, 32, 48, 64, 128, 256]
     images = []

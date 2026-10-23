@@ -1,16 +1,16 @@
-import os
+import io
 import json
+import os
+import queue
+import random
+import shutil
+import sys
 import threading
 import time
-import shutil
-from pathlib import Path
-from typing import List, Optional, Dict, Any
 import urllib.request
-import random
-import queue
 import zipfile
-import io
-import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 LOG_FILE = 'download_log.json'
 OUTPUT_TEMPLATE = '%(title)s-%(id)s.%(ext)s'
@@ -80,8 +80,8 @@ def ensure_yt_dlp(status_cb=None, min_version: str = MIN_YT_DLP):
 
     Returns the imported module. Raises RuntimeError if it cannot be made usable.
     """
-    import subprocess
     import importlib
+    import subprocess
 
     def report(msg):
         if status_cb:
@@ -232,7 +232,7 @@ def video_key(url: str) -> str:
     Fetching both wastes a slot in YouTube's hourly budget and writes the same
     file twice.
     """
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import parse_qs, urlparse
     try:
         parsed = urlparse(url)
         if 'youtu.be' in parsed.netloc:
@@ -250,7 +250,7 @@ def load_urls(file_path: str) -> List[str]:
             if not line or line.startswith('#'):
                 continue
             for part in line.split():
-                if part.startswith('http://') or part.startswith('https://'):
+                if part.startswith(('http://', 'https://')):
                     urls.append(part)
     seen = set()
     unique = []
@@ -415,9 +415,8 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
             status_cb("ffmpeg missing; cannot proceed (MP3 required)")
         return
 
-    if not ffmpeg and not require_mp3:
-        if status_cb:
-            status_cb("ffmpeg not found; will save original audio format")
+    if not ffmpeg and not require_mp3 and status_cb:
+        status_cb("ffmpeg not found; will save original audio format")
 
     workers = max(1, min(int(workers or 1), MAX_WORKERS))
     logger = _YdlLogger(status_cb)
@@ -459,7 +458,6 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
 
     # Resume: a long run will be interrupted, and re-fetching what is already on
     # disk wastes the hourly budget.
-    total = len(urls)
     skipped = 0
     pending: List[str] = []
     done_log = load_log() if skip_existing else {}
@@ -472,7 +470,7 @@ def download_urls(urls: List[str], out_dir: str, controller: DownloadController,
     if skipped and status_cb:
         status_cb(f"Skipping {skipped} already downloaded; {len(pending)} to fetch.")
 
-    work: 'queue.Queue' = queue.Queue()
+    work: queue.Queue = queue.Queue()
     for item in enumerate(pending, start=1):
         work.put(item)
 
@@ -624,7 +622,7 @@ def _resolve_output_path(ydl, entry: Dict[str, Any], out_dir: str, ffmpeg: Optio
 
 def _progress_hook(d, controller: DownloadController, status_cb, progress_cb):
     if controller.stop_event.is_set():
-        raise Exception('Stopped by user') 
+        raise Exception('Stopped by user')  # noqa: TRY002 - yt-dlp aborts the download on any exception
     controller.wait_if_paused()
     if d.get('status') == 'downloading' and progress_cb:
         total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0

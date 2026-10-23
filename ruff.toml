@@ -1,0 +1,14 @@
+# Ruff config kept close to the current code.
+# README promises Python 3.8+, so typing.List/Optional stay (no PEP 585/604 rewrites).
+target-version = "py38"
+
+[lint]
+extend-ignore = [
+    # The downloader and GUI deliberately keep going past any per-item, cleanup or
+    # cosmetic failure (one bad video must not stop a 500-link batch).
+    "BLE001",
+    "S110",
+    "S112",
+    # typing.List/Optional are the house style; no __future__ import needed for them.
+    "FA100",
+]
