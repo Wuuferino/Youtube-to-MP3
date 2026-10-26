@@ -208,7 +208,8 @@ def convert_leftovers(out_dir: str, ffmpeg_path: Optional[str] = None, status_cb
         return 0
     exts = {'.webm', '.m4a', '.opus'}
     count = 0
-    for p in Path(out_dir).glob('*'):
+    # Absolute paths: with out_dir '.', a title starting with '-' would otherwise reach ffmpeg as an option
+    for p in Path(out_dir).resolve().glob('*'):
         if p.suffix.lower() in exts:
             mp3_target = p.with_suffix('.mp3')
             if mp3_target.exists():
